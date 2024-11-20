@@ -66,14 +66,31 @@ namespace AzureGems.CosmosDB
 
 			_lazyDatabase = new AsyncLazy<Database>(async () =>
 			{
-				DatabaseResponse resp = await _sdkClient.CreateDatabaseIfNotExistsAsync(dbDatabaseConfig.DatabaseId, dbDatabaseConfig.SharedThroughput);
-
-				foreach (ContainerDefinition containerDefinition in definitions)
+				int retryCount = 0;
+				while (true)
 				{
-					await Internal_EnsureContainerExists(resp.Database, containerDefinition);
-				}
+					try
+					{
+						DatabaseResponse resp = await _sdkClient.CreateDatabaseIfNotExistsAsync(dbDatabaseConfig.DatabaseId, dbDatabaseConfig.SharedThroughput);
 
-				return resp.Database;
+						foreach (ContainerDefinition containerDefinition in definitions)
+						{
+							await Internal_EnsureContainerExists(resp.Database, containerDefinition);
+						}
+
+						return resp.Database;
+					}
+					catch (Exception error)
+					{
+						if (retryCount > 10)
+						{
+							throw new SystemException("Cannot initialiye database", error);
+						}
+
+						Console.WriteLine("WARNING: Transient error initializing database - {0}", error);
+						await Task.Delay(TimeSpan.FromSeconds(5));
+					}
+				}
 			});
 		}
 
@@ -105,12 +122,16 @@ namespace AzureGems.CosmosDB
 
 		public async Task<ICosmosDbContainer> GetContainer(string containerId)
 		{
-			return await _containerCache.GetOrAddAsync<string, ICosmosDbContainer>(containerId, async id =>
+			if (_containerCache.TryGetValue(containerId, out ICosmosDbContainer containerFromCache))
 			{
-				Container container = await Internal_GetContainer(containerId);
-				ContainerDefinition definition = GetContainerDefinition(containerId);
-				return new CosmosDbContainer(definition, this, container);
-			});
+				return containerFromCache;
+			}
+
+			Container container = await Internal_GetContainer(containerId);
+			ContainerDefinition definition = GetContainerDefinition(containerId);
+			ICosmosDbContainer newContainer = new CosmosDbContainer(definition, this, container);
+
+			return _containerCache.GetOrAdd(containerId, newContainer);
 		}
 
 		public async Task<ICosmosDbContainer> GetContainer<TEntity>()
@@ -133,7 +154,7 @@ namespace AzureGems.CosmosDB
         {
             await Task.Yield();
 
-            if (Interlocked.Increment(ref fakeCreateContainerIfNotExistsAsyncCallCount) == 1)
+            if (Interlocked.Increment(ref fakeCreateContainerIfNotExistsAsyncCallCount) <= 3)
             {
                 String injectedActivityId = Guid.NewGuid().ToString();
                 throw new CosmosException("Injected 404/1004", System.Net.HttpStatusCode.NotFound, 1004, injectedActivityId, 0);
