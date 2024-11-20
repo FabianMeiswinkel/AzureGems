@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Azure.Cosmos;
 
@@ -85,14 +86,14 @@ namespace AzureGems.CosmosDB
 		{
 			var containerDefinition = new ContainerProperties(id: containerId, partitionKeyPath: partitionKeyPath);
 
-			ContainerResponse response = await db.CreateContainerIfNotExistsAsync(
+			ContainerResponse response = await FakeCreateContainerIfNotExistsAsync(
+				db: db,
 				containerProperties: containerDefinition,
 				throughput: throughput,
 				requestOptions: null);
 
 			return response.Container;
 		}
-
 		private async Task<Container> Internal_GetContainer(string containerId)
 		{
 			Database database = await GetDatabase();
@@ -122,5 +123,23 @@ namespace AzureGems.CosmosDB
 		{
 			_sdkClient?.Dispose();
 		}
-	}
+
+        static long fakeCreateContainerIfNotExistsAsyncCallCount = 0;
+        private static async Task<ContainerResponse> FakeCreateContainerIfNotExistsAsync(
+            Database db,
+            ContainerProperties containerProperties,
+            int? throughput,
+            RequestOptions requestOptions)
+        {
+            await Task.Yield();
+
+            if (Interlocked.Increment(ref fakeCreateContainerIfNotExistsAsyncCallCount) == 1)
+            {
+                String injectedActivityId = Guid.NewGuid().ToString();
+                throw new CosmosException("Injected 404/1004", System.Net.HttpStatusCode.NotFound, 1004, injectedActivityId, 0);
+            }
+
+            return await db.CreateContainerIfNotExistsAsync(containerProperties, throughput, requestOptions);
+        }
+    }
 }
